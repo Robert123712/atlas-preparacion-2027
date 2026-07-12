@@ -1,50 +1,191 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { collection, onSnapshot, orderBy, query, type DocumentData, type QueryDocumentSnapshot, type Timestamp } from "firebase/firestore";
+import { createProjectRecord, createTaskRecord, db, initializeAnalytics, updateTaskStatus, uploadProjectDocument } from "@/lib/firebase";
 
 type Project = {
   id: string;
   name: string;
   area: string;
   owner: string;
-  initials: string;
-  color: string;
   progress: number;
-  risk: "En tiempo" | "Atención" | "Crítico";
-  docs: number;
-  updated: string;
-  insight: string;
+  risk: string;
+  status: string;
+  insight?: string;
+  updatedAt?: Timestamp;
 };
 
-const projects: Project[] = [
-  { id: "P-024", name: "Rediseño de turnos", area: "Operaciones", owner: "Mariana Torres", initials: "MT", color: "#5865f2", progress: 72, risk: "En tiempo", docs: 18, updated: "Hace 12 min", insight: "La simulación actual reduce 8.4 horas extra por persona al mes." },
-  { id: "P-019", name: "Automatización de nómina", area: "Finanzas", owner: "Carlos Vela", initials: "CV", color: "#f59e0b", progress: 46, risk: "Atención", docs: 11, updated: "Hace 1 h", insight: "Falta validar el tratamiento de pausas y jornadas discontinuas." },
-  { id: "P-031", name: "Cobertura sucursales norte", area: "Expansión", owner: "Ana Beltrán", initials: "AB", color: "#ec4899", progress: 28, risk: "Crítico", docs: 7, updated: "Ayer", insight: "La plantilla proyectada no cubre el escenario de 40 horas semanales." },
-  { id: "P-012", name: "Políticas de desconexión", area: "Personas", owner: "Diego Ramos", initials: "DR", color: "#14b8a6", progress: 88, risk: "En tiempo", docs: 24, updated: "Ayer", insight: "El borrador está alineado; quedan dos cláusulas por aprobar." },
-  { id: "P-008", name: "Tablero de productividad", area: "Tecnología", owner: "Lucía Peña", initials: "LP", color: "#8b5cf6", progress: 63, risk: "Atención", docs: 15, updated: "2 jul", insight: "Tres indicadores todavía premian horas trabajadas sobre resultados." },
-];
+type ProjectDocument = {
+  id: string;
+  name: string;
+  project: string;
+  contentType?: string;
+  status: string;
+  createdAt?: Timestamp;
+};
 
-const documents = [
-  { name: "Diagnóstico de jornadas Q2.pdf", project: "Rediseño de turnos", type: "PDF", date: "Hoy, 11:42", status: "Analizado" },
-  { name: "Matriz de escenarios 40h.xlsx", project: "Cobertura sucursales norte", type: "XLSX", date: "Hoy, 09:16", status: "Analizando" },
-  { name: "Borrador política v4.docx", project: "Políticas de desconexión", type: "DOCX", date: "Ayer, 16:30", status: "Analizado" },
-];
+type Finding = {
+  id: string;
+  title: string;
+  summary: string;
+  priority: string;
+  project?: string;
+};
+
+type Task = {
+  id: string;
+  title: string;
+  projectId: string;
+  projectName: string;
+  assignee: string;
+  status: string;
+  priority: string;
+  dueDate?: string;
+};
+
+function toProject(doc: QueryDocumentSnapshot<DocumentData>): Project {
+  const data = doc.data();
+  return {
+    id: doc.id,
+    name: String(data.name ?? "Proyecto sin nombre"),
+    area: String(data.area ?? "Sin área"),
+    owner: String(data.owner ?? "Sin responsable"),
+    progress: Number(data.progress ?? 0),
+    risk: String(data.risk ?? "Sin evaluar"),
+    status: String(data.status ?? "potential"),
+    insight: data.insight ? String(data.insight) : undefined,
+    updatedAt: data.updatedAt,
+  };
+}
+
+function toTask(doc: QueryDocumentSnapshot<DocumentData>): Task {
+  const data = doc.data();
+  return { id: doc.id, title: String(data.title ?? "Tarea sin título"), projectId: String(data.projectId ?? ""), projectName: String(data.projectName ?? "Sin proyecto"), assignee: String(data.assignee ?? "Sin asignar"), status: String(data.status ?? "backlog"), priority: String(data.priority ?? "medium"), dueDate: data.dueDate ? String(data.dueDate) : undefined };
+}
+
+function toDocument(doc: QueryDocumentSnapshot<DocumentData>): ProjectDocument {
+  const data = doc.data();
+  return {
+    id: doc.id,
+    name: String(data.name ?? "Documento sin nombre"),
+    project: String(data.project ?? "Sin proyecto"),
+    contentType: data.contentType ? String(data.contentType) : undefined,
+    status: String(data.status ?? "uploaded"),
+    createdAt: data.createdAt,
+  };
+}
+
+function toFinding(doc: QueryDocumentSnapshot<DocumentData>): Finding {
+  const data = doc.data();
+  return {
+    id: doc.id,
+    title: String(data.title ?? "Hallazgo sin título"),
+    summary: String(data.summary ?? ""),
+    priority: String(data.priority ?? "Sin prioridad"),
+    project: data.project ? String(data.project) : undefined,
+  };
+}
+
+function formatDate(value?: Timestamp) {
+  if (!value?.toDate) return "Pendiente";
+  return new Intl.DateTimeFormat("es-MX", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(value.toDate());
+}
+
+function initials(name: string) {
+  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "—";
+}
 
 export default function Home() {
   const [active, setActive] = useState("Resumen");
   const [search, setSearch] = useState("");
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [documents, setDocuments] = useState<ProjectDocument[]>([]);
+  const [findings, setFindings] = useState<Finding[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Project | null>(null);
-  const [assistantOpen, setAssistantOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [projectOpen, setProjectOpen] = useState(false);
+  const [taskOpen, setTaskOpen] = useState(false);
+  const [uploadProject, setUploadProject] = useState("Sin proyecto");
+  const [uploading, setUploading] = useState(false);
+  const [savingProject, setSavingProject] = useState(false);
+  const [newProject, setNewProject] = useState({ name: "", area: "", owner: "Eduardo", status: "potential" });
+  const [newTask, setNewTask] = useState({ title: "", projectId: "", assignee: "Eduardo", status: "todo", priority: "medium", dueDate: "" });
   const [toast, setToast] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const filtered = useMemo(() => projects.filter((p) => `${p.name} ${p.area} ${p.owner}`.toLowerCase().includes(search.toLowerCase())), [search]);
+  const filtered = useMemo(() => projects.filter((project) => `${project.name} ${project.area} ${project.owner}`.toLowerCase().includes(search.toLowerCase())), [projects, search]);
+  const completedProjects = projects.filter((project) => project.progress >= 100).length;
+  const readiness = projects.length ? Math.round(projects.reduce((sum, project) => sum + project.progress, 0) / projects.length) : null;
+
+  useEffect(() => {
+    initializeAnalytics().catch(() => undefined);
+    let ready = 0;
+    const markReady = () => { ready += 1; if (ready === 4) setLoading(false); };
+    const unsubProjects = onSnapshot(query(collection(db, "projects"), orderBy("createdAt", "desc")), (snapshot) => { setProjects(snapshot.docs.map(toProject)); markReady(); }, () => markReady());
+    const unsubDocuments = onSnapshot(query(collection(db, "documents"), orderBy("createdAt", "desc")), (snapshot) => { setDocuments(snapshot.docs.map(toDocument)); markReady(); }, () => markReady());
+    const unsubFindings = onSnapshot(collection(db, "findings"), (snapshot) => { setFindings(snapshot.docs.map(toFinding)); markReady(); }, () => markReady());
+    const unsubTasks = onSnapshot(query(collection(db, "tasks"), orderBy("createdAt", "desc")), (snapshot) => { setTasks(snapshot.docs.map(toTask)); markReady(); }, () => markReady());
+    return () => { unsubProjects(); unsubDocuments(); unsubFindings(); unsubTasks(); };
+  }, []);
 
   function notify(message: string) {
     setToast(message);
-    window.setTimeout(() => setToast(""), 2600);
+    window.setTimeout(() => setToast(""), 2800);
   }
+
+  async function handleFiles(files: FileList | null) {
+    if (!files?.length) return;
+    setUploading(true);
+    try {
+      await Promise.all(Array.from(files).map((file) => uploadProjectDocument(file, uploadProject)));
+      setUploadOpen(false);
+      notify(`${files.length} documento(s) guardados en Firebase`);
+    } catch (error) {
+      console.error("Firebase upload failed", error);
+      notify("No se pudo guardar. Revisa las reglas de Firebase.");
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  async function handleCreateProject(event: React.FormEvent) {
+    event.preventDefault();
+    if (!newProject.name.trim()) return;
+    setSavingProject(true);
+    try {
+      await createProjectRecord(newProject);
+      setProjectOpen(false);
+      setNewProject({ name: "", area: "", owner: "Eduardo", status: "potential" });
+      notify("Proyecto guardado en Firestore");
+    } catch (error) {
+      console.error("Firebase project creation failed", error);
+      notify("No se pudo crear el proyecto. Revisa las reglas de Firebase.");
+    } finally {
+      setSavingProject(false);
+    }
+  }
+
+  async function handleCreateTask(event: React.FormEvent) {
+    event.preventDefault();
+    const project = projects.find((item) => item.id === newTask.projectId);
+    if (!newTask.title.trim() || !project) return;
+    setSavingProject(true);
+    try {
+      await createTaskRecord({ ...newTask, projectName: project.name });
+      setTaskOpen(false);
+      setNewTask({ title: "", projectId: "", assignee: "Eduardo", status: "todo", priority: "medium", dueDate: "" });
+      notify("Tarea guardada en Firestore");
+    } catch (error) {
+      console.error("Task creation failed", error);
+      notify("No se pudo crear la tarea.");
+    } finally { setSavingProject(false); }
+  }
+
+  const today = new Intl.DateTimeFormat("es-MX", { weekday: "long", day: "numeric", month: "long" }).format(new Date()).toUpperCase();
 
   return (
     <main className="app-shell">
@@ -52,66 +193,75 @@ export default function Home() {
         <div className="brand"><span className="brand-mark">A</span><div><strong>Atlas</strong><small>Centro de inteligencia</small></div></div>
         <nav aria-label="Navegación principal">
           <p className="nav-label">ESPACIO DE TRABAJO</p>
-          {["Resumen", "Proyectos", "Documentos", "Hallazgos"].map((item, i) => <button key={item} className={active === item ? "nav-item active" : "nav-item"} onClick={() => setActive(item)}><span className="nav-icon">{["⌂","▦","□","✦"][i]}</span>{item}{item === "Hallazgos" && <em>6</em>}</button>)}
+          {["Resumen", "Proyectos", "Tareas", "Documentos", "Hallazgos"].map((item, index) => <button key={item} className={active === item ? "nav-item active" : "nav-item"} onClick={() => setActive(item)}><span className="nav-icon">{["⌂", "▦", "☷", "□", "✦"][index]}</span>{item}{item === "Hallazgos" && findings.length > 0 && <em>{findings.length}</em>}</button>)}
           <p className="nav-label second">PREPARACIÓN 2027</p>
-          {["Plan de transición", "Escenarios", "Cumplimiento"].map((item, i) => <button key={item} className={active === item ? "nav-item active" : "nav-item"} onClick={() => setActive(item)}><span className="nav-icon">{["◴","⌁","✓"][i]}</span>{item}</button>)}
+          {["Plan de transición", "Escenarios", "Cumplimiento"].map((item, index) => <button key={item} className={active === item ? "nav-item active" : "nav-item"} onClick={() => setActive(item)}><span className="nav-icon">{["◴", "⌁", "✓"][index]}</span>{item}</button>)}
         </nav>
-        <div className="sidebar-footer">
-          <button className="help">? <span>Ayuda y recursos</span></button>
-          <div className="profile"><div className="avatar">EN</div><div><strong>Eduardo Núñez</strong><small>Administrador</small></div><button>•••</button></div>
-        </div>
+        <div className="sidebar-footer"><div className="profile"><div className="avatar">EN</div><div><strong>Eduardo Núñez</strong><small>Administrador</small></div></div></div>
       </aside>
 
       <section className="workspace">
         <header className="topbar">
-          <div className="search-wrap"><span>⌕</span><input aria-label="Buscar" placeholder="Buscar proyectos, documentos o personas..." value={search} onChange={(e) => setSearch(e.target.value)} /><kbd>⌘ K</kbd></div>
-          <button className="icon-button" aria-label="Notificaciones">♢<i /></button>
+          <div className="search-wrap"><span>⌕</span><input aria-label="Buscar" placeholder="Buscar proyectos..." value={search} onChange={(event) => setSearch(event.target.value)} /><kbd>⌘ K</kbd></div>
+          <button className="primary secondary-action" onClick={() => setTaskOpen(true)}>＋ Nueva tarea</button>
+          <button className="primary secondary-action no-auto" onClick={() => setProjectOpen(true)}>＋ Nuevo proyecto</button>
           <button className="primary" onClick={() => setUploadOpen(true)}>＋ Agregar documento</button>
         </header>
 
         <div className="content">
-          <div className="heading-row"><div><p className="eyebrow">DOMINGO, 12 DE JULIO</p><h1>{active === "Resumen" ? "Buenos días, Eduardo" : active}</h1><p>Esto es lo que requiere tu atención hoy.</p></div><button className="jarvis-button" onClick={() => setAssistantOpen(true)}><span>✦</span> Pregúntale a Atlas</button></div>
+          <div className="heading-row"><div><p className="eyebrow">{today}</p><h1>{active === "Resumen" ? "Preparación para la ley laboral 2027" : active}</h1><p>{loading ? "Conectando con Firebase..." : "Información sincronizada con Firestore."}</p></div>{active === "Tareas" && <button className="primary" onClick={() => setTaskOpen(true)}>＋ Nueva tarea</button>}</div>
 
-          <section className="readiness-card">
-            <div className="readiness-copy"><div className="tag">JORNADA LABORAL 2027</div><h2>Tu organización está <span>68% preparada</span></h2><p>Atlas analizó 75 documentos en 12 proyectos y encontró 6 temas que conviene atender antes del siguiente trimestre.</p><button onClick={() => { setActive("Plan de transición"); notify("Abriendo el plan de transición"); }}>Ver plan de transición <b>→</b></button></div>
-            <div className="ring" style={{"--percent": "68%"} as React.CSSProperties}><div><strong>68%</strong><small>Preparación</small></div></div>
-            <div className="milestone"><span>PRÓXIMO HITO</span><strong>Diagnóstico de impacto</strong><small>Vence en 18 días · 3 tareas pendientes</small><div><i style={{width: "74%"}} /></div></div>
+          {active === "Tareas" ? <section className="kanban-wrap">
+            <div className="board-toolbar"><div><strong>Tablero de trabajo</strong><span>{tasks.length} tarea(s) · Eduardo y Roberto</span></div><div className="people-stack"><i>E</i><i>R</i></div></div>
+            <div className="kanban-board">{[
+              ["backlog", "Pendientes"], ["todo", "Por hacer"], ["in_progress", "En progreso"], ["review", "En revisión"], ["done", "Terminado"]
+            ].map(([status, label]) => <div className="kanban-column" key={status}><header><span className={`column-dot ${status}`} />{label}<em>{tasks.filter((task) => task.status === status).length}</em></header><div className="task-stack">{tasks.filter((task) => task.status === status).map((task) => <article className="task-card" key={task.id}><div className="task-meta"><span className={`priority ${task.priority}`}>{task.priority === "high" ? "Alta" : task.priority === "low" ? "Baja" : "Media"}</span><button>•••</button></div><h3>{task.title}</h3><p>{task.projectName}</p><footer><i>{task.assignee.charAt(0)}</i><span>{task.dueDate || "Sin fecha"}</span></footer><select aria-label={`Estado de ${task.title}`} value={task.status} onChange={(event) => void updateTaskStatus(task.id, event.target.value)}><option value="backlog">Pendientes</option><option value="todo">Por hacer</option><option value="in_progress">En progreso</option><option value="review">En revisión</option><option value="done">Terminado</option></select></article>)}{!loading && tasks.filter((task) => task.status === status).length === 0 && <button className="add-task-card" onClick={() => { setNewTask({ ...newTask, status }); setTaskOpen(true); }}>＋ Agregar tarea</button>}</div></div>)}</div>
+          </section> : active === "Proyectos" ? <section className="portfolio-view">
+            <div className="portfolio-head"><div><h2>Cartera de proyectos</h2><p>Separa oportunidades en evaluación del trabajo que ya está en marcha.</p></div><button className="primary" onClick={() => setProjectOpen(true)}>＋ Nuevo proyecto</button></div>
+            <div className="portfolio-grid">{[["potential", "Proyectos potenciales"], ["active", "Proyectos activos"]].map(([status, label]) => <section className="portfolio-group panel" key={status}><header><div><span className={`portfolio-dot ${status}`} /><h3>{label}</h3></div><em>{projects.filter((project) => project.status === status).length}</em></header>{projects.filter((project) => project.status === status).map((project) => <button className="portfolio-card" key={project.id} onClick={() => setSelected(project)}><div className="portfolio-card-top"><i>{project.name.charAt(0)}</i><span className="status neutral">{project.risk}</span></div><h4>{project.name}</h4><p>{project.area}</p><footer><span><b>{initials(project.owner)}</b>{project.owner}</span><em>{tasks.filter((task) => task.projectId === project.id).length} tareas</em></footer></button>)}{!loading && projects.filter((project) => project.status === status).length === 0 && <div className="portfolio-empty">No hay proyectos en esta etapa.</div>}</section>)}</div>
+          </section> : <>
+
+          <section className={`readiness-card ${readiness === null ? "readiness-empty" : ""}`}>
+            <div className="readiness-copy"><div className="tag">JORNADA LABORAL 2027</div>{readiness === null ? <><h2>Aún no hay datos para calcular la preparación</h2><p>Crea tu primer proyecto y agrega sus documentos. El indicador se construirá con información real.</p><button onClick={() => setProjectOpen(true)}>Crear primer proyecto <b>→</b></button></> : <><h2>Preparación actual: <span>{readiness}%</span></h2><p>Promedio calculado con el avance registrado en {projects.length} proyecto(s) y {documents.length} documento(s).</p><button onClick={() => setActive("Plan de transición")}>Ver plan de transición <b>→</b></button></>}</div>
+            {readiness !== null && <div className="ring" style={{ "--percent": `${readiness}%` } as React.CSSProperties}><div><strong>{readiness}%</strong><small>Preparación</small></div></div>}
+            <div className="milestone"><span>DATOS CONECTADOS</span><strong>Cloud Firestore</strong><small>Los cambios aparecen automáticamente</small></div>
           </section>
 
           <section className="metrics">
-            <article><span className="metric-icon blue">▦</span><div><small>PROYECTOS ACTIVOS</small><strong>12</strong><p><b>↑ 2</b> este mes</p></div></article>
-            <article><span className="metric-icon violet">□</span><div><small>DOCUMENTOS ANALIZADOS</small><strong>75</strong><p><b>+14</b> esta semana</p></div></article>
-            <article><span className="metric-icon amber">!</span><div><small>HALLAZGOS ABIERTOS</small><strong>6</strong><p><b>3</b> de prioridad alta</p></div></article>
-            <article><span className="metric-icon green">✓</span><div><small>TAREAS COMPLETADAS</small><strong>84%</strong><p><b>↑ 6%</b> vs. mes anterior</p></div></article>
+            <article><span className="metric-icon blue">▦</span><div><small>PROYECTOS ACTIVOS</small><strong>{projects.length}</strong><p>Registros en Firestore</p></div></article>
+            <article><span className="metric-icon violet">□</span><div><small>DOCUMENTOS</small><strong>{documents.length}</strong><p>Archivos registrados</p></div></article>
+            <article><span className="metric-icon amber">!</span><div><small>HALLAZGOS ABIERTOS</small><strong>{findings.length}</strong><p>Análisis registrados</p></div></article>
+            <article><span className="metric-icon green">✓</span><div><small>PROYECTOS COMPLETADOS</small><strong>{completedProjects}</strong><p>Con 100% de avance</p></div></article>
           </section>
 
           <div className="grid-main">
             <section className="panel projects-panel">
-              <div className="panel-head"><div><h2>Proyectos que requieren atención</h2><p>Priorizados por riesgo, avance y fecha límite.</p></div><button onClick={() => setActive("Proyectos")}>Ver todos →</button></div>
+              <div className="panel-head"><div><h2>Proyectos</h2><p>Datos en tiempo real desde Firestore.</p></div><button onClick={() => setProjectOpen(true)}>Nuevo proyecto ＋</button></div>
               <div className="table-head"><span>PROYECTO</span><span>RESPONSABLE</span><span>AVANCE</span><span>ESTADO</span><span /></div>
-              {filtered.slice(0,4).map((project) => <button className="project-row" key={project.id} onClick={() => setSelected(project)}><span className="project-title"><i style={{background: project.color}}>{project.name.charAt(0)}</i><span><strong>{project.name}</strong><small>{project.id} · {project.area}</small></span></span><span className="owner"><i>{project.initials}</i><span>{project.owner}</span></span><span className="progress"><b>{project.progress}%</b><i><em style={{width: `${project.progress}%`}} /></i></span><span className={`status ${project.risk.toLowerCase().replace("í","i").replace(" ", "-")}`}>{project.risk}</span><span className="chevron">›</span></button>)}
-              {filtered.length === 0 && <div className="empty">No encontramos proyectos con “{search}”.</div>}
+              {filtered.slice(0, 6).map((project) => <button className="project-row" key={project.id} onClick={() => setSelected(project)}><span className="project-title"><i>{project.name.charAt(0).toUpperCase()}</i><span><strong>{project.name}</strong><small>{project.area}</small></span></span><span className="owner"><i>{initials(project.owner)}</i><span>{project.owner}</span></span><span className="progress"><b>{project.progress}%</b><i><em style={{ width: `${Math.min(100, Math.max(0, project.progress))}%` }} /></i></span><span className="status neutral">{project.risk}</span><span className="chevron">›</span></button>)}
+              {!loading && filtered.length === 0 && <div className="empty"><strong>{search ? "No hay coincidencias" : "Todavía no hay proyectos"}</strong><p>{search ? "Prueba con otro término." : "Crea el primero para comenzar a organizar la información real."}</p>{!search && <button className="primary" onClick={() => setProjectOpen(true)}>Crear proyecto</button>}</div>}
             </section>
 
             <aside className="panel insight-panel">
-              <div className="spark">✦</div><span className="ai-label">HALLAZGO DE ATLAS</span><h2>Hay un patrón que deberías revisar</h2><p>3 proyectos dependen de esquemas de horas extra que podrían volverse insostenibles con la reducción de jornada.</p>
-              <div className="mini-projects"><span><i className="dot pink" />Cobertura sucursales norte <b>24%</b></span><span><i className="dot amber-dot" />Automatización de nómina <b>18%</b></span><span><i className="dot purple-dot" />Tablero de productividad <b>12%</b></span></div>
-              <button onClick={() => setAssistantOpen(true)}>Explorar con Atlas <b>→</b></button><small>Basado en 23 documentos · Actualizado hoy</small>
+              <div className="spark">✦</div><span className="ai-label">HALLAZGOS</span>{findings.length ? <><h2>{findings[0].title}</h2><p>{findings[0].summary || "Sin resumen registrado."}</p><div className="mini-projects">{findings.slice(0, 3).map((finding) => <span key={finding.id}><i className="dot purple-dot" />{finding.project || "General"}<b>{finding.priority}</b></span>)}</div><button onClick={() => setActive("Hallazgos")}>Ver hallazgos <b>→</b></button></> : <><h2>Sin hallazgos registrados</h2><p>Cuando el análisis de documentos genere resultados, aparecerán aquí.</p><small>Fuente: colección “findings”</small></>}
             </aside>
           </div>
 
           <section className="panel documents-panel">
-            <div className="panel-head"><div><h2>Documentos recientes</h2><p>Atlas los organiza y conecta automáticamente con cada proyecto.</p></div><button onClick={() => setActive("Documentos")}>Abrir biblioteca →</button></div>
-            <div className="document-list">{documents.map((doc) => <div className="document" key={doc.name}><span className={`file-icon ${doc.type.toLowerCase()}`}>{doc.type.slice(0,1)}</span><span><strong>{doc.name}</strong><small>{doc.project}</small></span><em>{doc.date}</em><b className={doc.status === "Analizando" ? "processing" : "done"}>{doc.status === "Analizando" ? "◌" : "✓"} {doc.status}</b><button aria-label={`Opciones para ${doc.name}`}>•••</button></div>)}</div>
+            <div className="panel-head"><div><h2>Documentos recientes</h2><p>Archivos reales registrados en Firebase.</p></div><button onClick={() => setUploadOpen(true)}>Agregar documento ＋</button></div>
+            <div className="document-list">{documents.slice(0, 5).map((doc) => { const extension = doc.name.split(".").pop()?.toUpperCase() || "FILE"; return <div className="document" key={doc.id}><span className={`file-icon ${extension.toLowerCase()}`}>{extension.slice(0, 1)}</span><span><strong>{doc.name}</strong><small>{doc.project}</small></span><em>{formatDate(doc.createdAt)}</em><b className={doc.status === "analyzed" ? "done" : "processing"}>{doc.status === "analyzed" ? "✓ Analizado" : doc.status}</b><button aria-label={`Opciones para ${doc.name}`}>•••</button></div>; })}{!loading && documents.length === 0 && <div className="empty"><strong>Todavía no hay documentos</strong><p>Agrega el primero para comenzar a construir la base de conocimiento.</p><button className="primary" onClick={() => setUploadOpen(true)}>Agregar documento</button></div>}</div>
           </section>
+          </>}
         </div>
       </section>
 
-      {selected && <div className="scrim" onMouseDown={(e) => e.target === e.currentTarget && setSelected(null)}><aside className="drawer"><button className="close" onClick={() => setSelected(null)}>×</button><span className={`status ${selected.risk.toLowerCase().replace("í","i")}`}>{selected.risk}</span><h2>{selected.name}</h2><p className="muted">{selected.id} · {selected.area}</p><div className="drawer-score"><strong>{selected.progress}%</strong><span>Avance general</span><i><em style={{width: `${selected.progress}%`}} /></i></div><h3>Lectura de Atlas</h3><div className="assistant-note"><span>✦</span><p>{selected.insight}</p></div><h3>Contexto del proyecto</h3><dl><div><dt>Responsable</dt><dd>{selected.owner}</dd></div><div><dt>Documentos</dt><dd>{selected.docs}</dd></div><div><dt>Última actividad</dt><dd>{selected.updated}</dd></div></dl><button className="primary wide" onClick={() => setAssistantOpen(true)}>Conversar sobre este proyecto</button></aside></div>}
+      {selected && <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && setSelected(null)}><aside className="drawer"><button className="close" onClick={() => setSelected(null)}>×</button><span className="status neutral">{selected.risk}</span><h2>{selected.name}</h2><p className="muted">{selected.id} · {selected.area}</p><div className="drawer-score"><strong>{selected.progress}%</strong><span>Avance registrado</span><i><em style={{ width: `${selected.progress}%` }} /></i></div><h3>Lectura de Atlas</h3><div className="assistant-note"><span>✦</span><p>{selected.insight || "Este proyecto aún no tiene un análisis registrado."}</p></div><h3>Contexto del proyecto</h3><dl><div><dt>Responsable</dt><dd>{selected.owner}</dd></div><div><dt>Última actualización</dt><dd>{formatDate(selected.updatedAt)}</dd></div></dl></aside></div>}
 
-      {assistantOpen && <div className="scrim" onMouseDown={(e) => e.target === e.currentTarget && setAssistantOpen(false)}><aside className="drawer assistant-drawer"><button className="close" onClick={() => setAssistantOpen(false)}>×</button><div className="assistant-brand"><span>✦</span><div><h2>Atlas</h2><p>Tu inteligencia de proyectos</p></div></div><div className="chat"><div className="message ai">Hola, Eduardo. Puedo cruzar información entre todos tus proyectos y documentos. ¿Qué necesitas entender?</div><p>SUGERENCIAS</p>{["¿Qué proyectos están en mayor riesgo?", "Resume el impacto de la jornada de 40 horas", "¿Qué decisiones siguen pendientes?"].map(q => <button key={q} onClick={() => notify("Atlas está preparando la respuesta...")}>{q}<span>→</span></button>)}</div><div className="composer"><textarea aria-label="Pregunta para Atlas" placeholder="Pregunta sobre tus proyectos..." /><button onClick={() => notify("Atlas está analizando 75 documentos...")}>↑</button></div><small className="disclaimer">Atlas puede cometer errores. Verifica decisiones importantes.</small></aside></div>}
+      {projectOpen && <div className="scrim modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && !savingProject && setProjectOpen(false)}><form className="upload-modal" onSubmit={handleCreateProject}><button type="button" className="close" disabled={savingProject} onClick={() => setProjectOpen(false)}>×</button><span className="modal-icon">▦</span><h2>Nuevo proyecto</h2><p>Agrégalo como potencial mientras se evalúa o como activo si ya está aprobado.</p><label>Nombre del proyecto<input required autoFocus value={newProject.name} onChange={(event) => setNewProject({ ...newProject, name: event.target.value })} /></label><label>Área<input value={newProject.area} onChange={(event) => setNewProject({ ...newProject, area: event.target.value })} /></label><label>Responsable<select value={newProject.owner} onChange={(event) => setNewProject({ ...newProject, owner: event.target.value })}><option>Eduardo</option><option>Roberto</option></select></label><label>Etapa<select value={newProject.status} onChange={(event) => setNewProject({ ...newProject, status: event.target.value })}><option value="potential">Potencial</option><option value="active">Activo</option></select></label><div className="modal-actions"><button type="button" disabled={savingProject} onClick={() => setProjectOpen(false)}>Cancelar</button><button className="primary" disabled={savingProject}>{savingProject ? "Guardando..." : "Crear proyecto"}</button></div></form></div>}
 
-      {uploadOpen && <div className="scrim modal-scrim" onMouseDown={(e) => e.target === e.currentTarget && setUploadOpen(false)}><section className="upload-modal"><button className="close" onClick={() => setUploadOpen(false)}>×</button><span className="modal-icon">□</span><h2>Agregar documentos</h2><p>Atlas leerá el contenido, lo conectará con tus proyectos y extraerá riesgos, decisiones y próximos pasos.</p><button className="dropzone" onClick={() => fileRef.current?.click()}><span>↑</span><strong>Selecciona archivos o arrástralos aquí</strong><small>PDF, DOCX, XLSX, PPTX o TXT · Máx. 25 MB</small></button><input ref={fileRef} type="file" multiple hidden onChange={(e) => { if (e.target.files?.length) { setUploadOpen(false); notify(`${e.target.files.length} documento(s) enviados a análisis`); } }} /><label>Asignar al proyecto<select><option>Atlas decidirá automáticamente</option>{projects.map(p => <option key={p.id}>{p.name}</option>)}</select></label><div className="modal-actions"><button onClick={() => setUploadOpen(false)}>Cancelar</button><button className="primary" onClick={() => fileRef.current?.click()}>Elegir archivos</button></div></section></div>}
+      {taskOpen && <div className="scrim modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && !savingProject && setTaskOpen(false)}><form className="upload-modal task-modal" onSubmit={handleCreateTask}><button type="button" className="close" disabled={savingProject} onClick={() => setTaskOpen(false)}>×</button><span className="modal-icon">☷</span><h2>Nueva tarea</h2><p>Cada tarea debe pertenecer a un proyecto y tener una persona responsable.</p><label>Título<input required autoFocus value={newTask.title} onChange={(event) => setNewTask({ ...newTask, title: event.target.value })} /></label><label>Proyecto<select required value={newTask.projectId} onChange={(event) => setNewTask({ ...newTask, projectId: event.target.value })}><option value="">Selecciona un proyecto</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><div className="form-grid"><label>Responsable<select value={newTask.assignee} onChange={(event) => setNewTask({ ...newTask, assignee: event.target.value })}><option>Eduardo</option><option>Roberto</option></select></label><label>Prioridad<select value={newTask.priority} onChange={(event) => setNewTask({ ...newTask, priority: event.target.value })}><option value="low">Baja</option><option value="medium">Media</option><option value="high">Alta</option></select></label><label>Estado<select value={newTask.status} onChange={(event) => setNewTask({ ...newTask, status: event.target.value })}><option value="backlog">Pendientes</option><option value="todo">Por hacer</option><option value="in_progress">En progreso</option><option value="review">En revisión</option><option value="done">Terminado</option></select></label><label>Fecha límite<input type="date" value={newTask.dueDate} onChange={(event) => setNewTask({ ...newTask, dueDate: event.target.value })} /></label></div><div className="modal-actions"><button type="button" disabled={savingProject} onClick={() => setTaskOpen(false)}>Cancelar</button><button className="primary" disabled={savingProject || projects.length === 0}>{savingProject ? "Guardando..." : "Crear tarea"}</button></div>{projects.length === 0 && <small className="form-hint">Primero crea un proyecto.</small>}</form></div>}
+
+      {uploadOpen && <div className="scrim modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && !uploading && setUploadOpen(false)}><section className="upload-modal"><button className="close" disabled={uploading} onClick={() => setUploadOpen(false)}>×</button><span className="modal-icon">□</span><h2>Agregar documentos</h2><p>El archivo se guardará en Firebase Storage y sus datos en Cloud Firestore.</p><button className="dropzone" disabled={uploading} onClick={() => fileRef.current?.click()}><span>{uploading ? "◌" : "↑"}</span><strong>{uploading ? "Guardando en Firebase..." : "Selecciona archivos"}</strong><small>PDF, DOCX, XLSX, PPTX o TXT · Máx. 25 MB</small></button><input ref={fileRef} type="file" multiple hidden onChange={(event) => void handleFiles(event.target.files)} /><label>Asignar al proyecto<select disabled={uploading} value={uploadProject} onChange={(event) => setUploadProject(event.target.value)}><option>Sin proyecto</option>{projects.map((project) => <option key={project.id}>{project.name}</option>)}</select></label><div className="modal-actions"><button disabled={uploading} onClick={() => setUploadOpen(false)}>Cancelar</button><button disabled={uploading} className="primary" onClick={() => fileRef.current?.click()}>{uploading ? "Guardando..." : "Elegir archivos"}</button></div></section></div>}
       {toast && <div className="toast"><span>✓</span>{toast}</div>}
     </main>
   );
