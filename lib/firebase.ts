@@ -61,9 +61,10 @@ export async function createProjectRecord(input: { name: string; area: string; o
   return record.id;
 }
 
-export async function createTaskRecord(input: { title: string; projectId: string; projectName: string; assignee: string; status: string; priority: string; dueDate: string }) {
+export async function createTaskRecord(input: { title: string; description: string; projectId: string; projectName: string; assignee: string; status: string; priority: string; dueDate: string }) {
   const record = await addDoc(collection(db, "tasks"), {
     title: input.title.trim(),
+    description: input.description.trim(),
     projectId: input.projectId,
     projectName: input.projectName,
     assignee: input.assignee,
@@ -78,4 +79,8 @@ export async function createTaskRecord(input: { title: string; projectId: string
 
 export async function updateTaskStatus(taskId: string, status: string) {
   await updateDoc(doc(db, "tasks", taskId), { status, updatedAt: serverTimestamp() });
+}
+
+export async function updateTaskDescription(taskId: string, description: string) {
+  await updateDoc(doc(db, "tasks", taskId), { description: description.trim(), updatedAt: serverTimestamp() });
 }

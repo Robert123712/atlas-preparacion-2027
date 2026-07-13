@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { collection, onSnapshot, orderBy, query, type DocumentData, type QueryDocumentSnapshot, type Timestamp } from "firebase/firestore";
-import { createProjectRecord, createTaskRecord, db, initializeAnalytics, updateTaskStatus, uploadProjectDocument } from "@/lib/firebase";
+import { createProjectRecord, createTaskRecord, db, initializeAnalytics, updateTaskDescription, updateTaskStatus, uploadProjectDocument } from "@/lib/firebase";
 
 type Project = {
   id: string;
@@ -13,6 +13,9 @@ type Project = {
   risk: string;
   status: string;
   insight?: string;
+  description?: string;
+  session2Alignment?: string;
+  priority?: string;
   updatedAt?: Timestamp;
 };
 
@@ -36,6 +39,7 @@ type Finding = {
 type Task = {
   id: string;
   title: string;
+  description: string;
   projectId: string;
   projectName: string;
   assignee: string;
@@ -55,13 +59,16 @@ function toProject(doc: QueryDocumentSnapshot<DocumentData>): Project {
     risk: String(data.risk ?? "Sin evaluar"),
     status: String(data.status ?? "potential"),
     insight: data.insight ? String(data.insight) : undefined,
+    description: data.description ? String(data.description) : undefined,
+    session2Alignment: data.session2Alignment ? String(data.session2Alignment) : undefined,
+    priority: data.priority ? String(data.priority) : undefined,
     updatedAt: data.updatedAt,
   };
 }
 
 function toTask(doc: QueryDocumentSnapshot<DocumentData>): Task {
   const data = doc.data();
-  return { id: doc.id, title: String(data.title ?? "Tarea sin título"), projectId: String(data.projectId ?? ""), projectName: String(data.projectName ?? "Sin proyecto"), assignee: String(data.assignee ?? "Sin asignar"), status: String(data.status ?? "backlog"), priority: String(data.priority ?? "medium"), dueDate: data.dueDate ? String(data.dueDate) : undefined };
+  return { id: doc.id, title: String(data.title ?? "Tarea sin título"), description: String(data.description ?? ""), projectId: String(data.projectId ?? ""), projectName: String(data.projectName ?? "Sin proyecto"), assignee: String(data.assignee ?? "Sin asignar"), status: String(data.status ?? "backlog"), priority: String(data.priority ?? "medium"), dueDate: data.dueDate ? String(data.dueDate) : undefined };
 }
 
 function toDocument(doc: QueryDocumentSnapshot<DocumentData>): ProjectDocument {
@@ -105,6 +112,9 @@ export default function Home() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Project | null>(null);
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [taskDescription, setTaskDescription] = useState("");
+  const [todayLabel, setTodayLabel] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
   const [projectOpen, setProjectOpen] = useState(false);
   const [taskOpen, setTaskOpen] = useState(false);
@@ -112,7 +122,7 @@ export default function Home() {
   const [uploading, setUploading] = useState(false);
   const [savingProject, setSavingProject] = useState(false);
   const [newProject, setNewProject] = useState({ name: "", area: "", owner: "Eduardo", status: "potential" });
-  const [newTask, setNewTask] = useState({ title: "", projectId: "", assignee: "Eduardo", status: "todo", priority: "medium", dueDate: "" });
+  const [newTask, setNewTask] = useState({ title: "", description: "", projectId: "", assignee: "Eduardo", status: "todo", priority: "medium", dueDate: "" });
   const [toast, setToast] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -121,6 +131,7 @@ export default function Home() {
   const readiness = projects.length ? Math.round(projects.reduce((sum, project) => sum + project.progress, 0) / projects.length) : null;
 
   useEffect(() => {
+    setTodayLabel(new Intl.DateTimeFormat("es-MX", { weekday: "long", day: "numeric", month: "long", timeZone: "America/Chihuahua" }).format(new Date()).toUpperCase());
     initializeAnalytics().catch(() => undefined);
     let ready = 0;
     const markReady = () => { ready += 1; if (ready === 4) setLoading(false); };
@@ -177,7 +188,7 @@ export default function Home() {
     try {
       await createTaskRecord({ ...newTask, projectName: project.name });
       setTaskOpen(false);
-      setNewTask({ title: "", projectId: "", assignee: "Eduardo", status: "todo", priority: "medium", dueDate: "" });
+      setNewTask({ title: "", description: "", projectId: "", assignee: "Eduardo", status: "todo", priority: "medium", dueDate: "" });
       notify("Tarea guardada en Firestore");
     } catch (error) {
       console.error("Task creation failed", error);
@@ -185,7 +196,18 @@ export default function Home() {
     } finally { setSavingProject(false); }
   }
 
-  const today = new Intl.DateTimeFormat("es-MX", { weekday: "long", day: "numeric", month: "long" }).format(new Date()).toUpperCase();
+  async function saveTaskDescription() {
+    if (!selectedTask) return;
+    setSavingProject(true);
+    try {
+      await updateTaskDescription(selectedTask.id, taskDescription);
+      setSelectedTask({ ...selectedTask, description: taskDescription.trim() });
+      notify("Descripción actualizada");
+    } catch (error) {
+      console.error("Task description update failed", error);
+      notify("No se pudo actualizar la descripción.");
+    } finally { setSavingProject(false); }
+  }
 
   return (
     <main className="app-shell">
@@ -209,13 +231,13 @@ export default function Home() {
         </header>
 
         <div className="content">
-          <div className="heading-row"><div><p className="eyebrow">{today}</p><h1>{active === "Resumen" ? "Preparación para la ley laboral 2027" : active}</h1><p>{loading ? "Conectando con Firebase..." : "Información sincronizada con Firestore."}</p></div>{active === "Tareas" && <button className="primary" onClick={() => setTaskOpen(true)}>＋ Nueva tarea</button>}</div>
+          <div className="heading-row"><div><p className="eyebrow">{todayLabel || "HOY"}</p><h1>{active === "Resumen" ? "Preparación para la ley laboral 2027" : active}</h1><p>{loading ? "Conectando con Firebase..." : "Información sincronizada con Firestore."}</p></div>{active === "Tareas" && <button className="primary" onClick={() => setTaskOpen(true)}>＋ Nueva tarea</button>}</div>
 
           {active === "Tareas" ? <section className="kanban-wrap">
             <div className="board-toolbar"><div><strong>Tablero de trabajo</strong><span>{tasks.length} tarea(s) · Eduardo y Roberto</span></div><div className="people-stack"><i>E</i><i>R</i></div></div>
             <div className="kanban-board">{[
               ["backlog", "Pendientes"], ["todo", "Por hacer"], ["in_progress", "En progreso"], ["review", "En revisión"], ["done", "Terminado"]
-            ].map(([status, label]) => <div className="kanban-column" key={status}><header><span className={`column-dot ${status}`} />{label}<em>{tasks.filter((task) => task.status === status).length}</em></header><div className="task-stack">{tasks.filter((task) => task.status === status).map((task) => <article className="task-card" key={task.id}><div className="task-meta"><span className={`priority ${task.priority}`}>{task.priority === "high" ? "Alta" : task.priority === "low" ? "Baja" : "Media"}</span><button>•••</button></div><h3>{task.title}</h3><p>{task.projectName}</p><footer><i>{task.assignee.charAt(0)}</i><span>{task.dueDate || "Sin fecha"}</span></footer><select aria-label={`Estado de ${task.title}`} value={task.status} onChange={(event) => void updateTaskStatus(task.id, event.target.value)}><option value="backlog">Pendientes</option><option value="todo">Por hacer</option><option value="in_progress">En progreso</option><option value="review">En revisión</option><option value="done">Terminado</option></select></article>)}{!loading && tasks.filter((task) => task.status === status).length === 0 && <button className="add-task-card" onClick={() => { setNewTask({ ...newTask, status }); setTaskOpen(true); }}>＋ Agregar tarea</button>}</div></div>)}</div>
+            ].map(([status, label]) => <div className="kanban-column" key={status}><header><span className={`column-dot ${status}`} />{label}<em>{tasks.filter((task) => task.status === status).length}</em></header><div className="task-stack">{tasks.filter((task) => task.status === status).map((task) => <article className="task-card clickable" role="button" tabIndex={0} key={task.id} onClick={() => { setSelectedTask(task); setTaskDescription(task.description); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { setSelectedTask(task); setTaskDescription(task.description); } }}><div className="task-meta"><span className={`priority ${task.priority}`}>{task.priority === "high" ? "Alta" : task.priority === "low" ? "Baja" : "Media"}</span><span>Ver detalle ›</span></div><h3>{task.title}</h3><p>{task.description || "Sin descripción práctica"}</p><small>{task.projectName}</small><footer><i>{task.assignee.charAt(0)}</i><span>{task.dueDate || "Sin fecha"}</span></footer><select aria-label={`Estado de ${task.title}`} value={task.status} onClick={(event) => event.stopPropagation()} onChange={(event) => { event.stopPropagation(); void updateTaskStatus(task.id, event.target.value); }}><option value="backlog">Pendientes</option><option value="todo">Por hacer</option><option value="in_progress">En progreso</option><option value="review">En revisión</option><option value="done">Terminado</option></select></article>)}{!loading && tasks.filter((task) => task.status === status).length === 0 && <button className="add-task-card" onClick={() => { setNewTask({ ...newTask, status }); setTaskOpen(true); }}>＋ Agregar tarea</button>}</div></div>)}</div>
           </section> : active === "Proyectos" ? <section className="portfolio-view">
             <div className="portfolio-head"><div><h2>Cartera de proyectos</h2><p>Separa oportunidades en evaluación del trabajo que ya está en marcha.</p></div><button className="primary" onClick={() => setProjectOpen(true)}>＋ Nuevo proyecto</button></div>
             <div className="portfolio-grid">{[["potential", "Proyectos potenciales"], ["active", "Proyectos activos"]].map(([status, label]) => <section className="portfolio-group panel" key={status}><header><div><span className={`portfolio-dot ${status}`} /><h3>{label}</h3></div><em>{projects.filter((project) => project.status === status).length}</em></header>{projects.filter((project) => project.status === status).map((project) => <button className="portfolio-card" key={project.id} onClick={() => setSelected(project)}><div className="portfolio-card-top"><i>{project.name.charAt(0)}</i><span className="status neutral">{project.risk}</span></div><h4>{project.name}</h4><p>{project.area}</p><footer><span><b>{initials(project.owner)}</b>{project.owner}</span><em>{tasks.filter((task) => task.projectId === project.id).length} tareas</em></footer></button>)}{!loading && projects.filter((project) => project.status === status).length === 0 && <div className="portfolio-empty">No hay proyectos en esta etapa.</div>}</section>)}</div>
@@ -255,11 +277,13 @@ export default function Home() {
         </div>
       </section>
 
-      {selected && <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && setSelected(null)}><aside className="drawer"><button className="close" onClick={() => setSelected(null)}>×</button><span className="status neutral">{selected.risk}</span><h2>{selected.name}</h2><p className="muted">{selected.id} · {selected.area}</p><div className="drawer-score"><strong>{selected.progress}%</strong><span>Avance registrado</span><i><em style={{ width: `${selected.progress}%` }} /></i></div><h3>Lectura de Atlas</h3><div className="assistant-note"><span>✦</span><p>{selected.insight || "Este proyecto aún no tiene un análisis registrado."}</p></div><h3>Contexto del proyecto</h3><dl><div><dt>Responsable</dt><dd>{selected.owner}</dd></div><div><dt>Última actualización</dt><dd>{formatDate(selected.updatedAt)}</dd></div></dl></aside></div>}
+      {selected && <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && setSelected(null)}><aside className="drawer"><button className="close" onClick={() => setSelected(null)}>×</button><span className="status neutral">{selected.status === "active" ? "Activo" : "Potencial"}</span><h2>{selected.name}</h2><p className="muted">{selected.area}</p>{selected.description && <><h3>Propuesta</h3><p className="drawer-description">{selected.description}</p></>}<h3>Visión actualizada en sesión 2</h3><div className="assistant-note"><span>✦</span><p>{selected.session2Alignment || "Pendiente de definir alineación estratégica."}</p></div><h3>Contexto del proyecto</h3><dl><div><dt>Responsable inicial</dt><dd>{selected.owner}</dd></div><div><dt>Prioridad</dt><dd>{selected.priority || "Sin definir"}</dd></div><div><dt>Avance</dt><dd>{selected.progress}%</dd></div><div><dt>Última actualización</dt><dd>{formatDate(selected.updatedAt)}</dd></div></dl></aside></div>}
+
+      {selectedTask && <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && setSelectedTask(null)}><aside className="drawer task-detail"><button className="close" onClick={() => setSelectedTask(null)}>×</button><span className={`priority ${selectedTask.priority}`}>{selectedTask.priority === "high" ? "Prioridad alta" : selectedTask.priority === "low" ? "Prioridad baja" : "Prioridad media"}</span><h2>{selectedTask.title}</h2><p className="muted">{selectedTask.projectName}</p><h3>Descripción práctica</h3><p className="field-help">Explica con palabras sencillas qué hay que hacer, qué se debe entregar y cuándo se considera terminada.</p><textarea className="task-description-editor" value={taskDescription} onChange={(event) => setTaskDescription(event.target.value)} placeholder="Ejemplo: Revisar el documento, resumir los requisitos en una página y compartirlos con Roberto para validación." /><button className="primary wide" disabled={savingProject} onClick={() => void saveTaskDescription()}>{savingProject ? "Guardando..." : "Guardar descripción"}</button><h3>Datos de la tarea</h3><dl><div><dt>Responsable</dt><dd>{selectedTask.assignee}</dd></div><div><dt>Estado</dt><dd>{selectedTask.status.replaceAll("_", " ")}</dd></div><div><dt>Fecha límite</dt><dd>{selectedTask.dueDate || "Sin fecha"}</dd></div></dl></aside></div>}
 
       {projectOpen && <div className="scrim modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && !savingProject && setProjectOpen(false)}><form className="upload-modal" onSubmit={handleCreateProject}><button type="button" className="close" disabled={savingProject} onClick={() => setProjectOpen(false)}>×</button><span className="modal-icon">▦</span><h2>Nuevo proyecto</h2><p>Agrégalo como potencial mientras se evalúa o como activo si ya está aprobado.</p><label>Nombre del proyecto<input required autoFocus value={newProject.name} onChange={(event) => setNewProject({ ...newProject, name: event.target.value })} /></label><label>Área<input value={newProject.area} onChange={(event) => setNewProject({ ...newProject, area: event.target.value })} /></label><label>Responsable<select value={newProject.owner} onChange={(event) => setNewProject({ ...newProject, owner: event.target.value })}><option>Eduardo</option><option>Roberto</option></select></label><label>Etapa<select value={newProject.status} onChange={(event) => setNewProject({ ...newProject, status: event.target.value })}><option value="potential">Potencial</option><option value="active">Activo</option></select></label><div className="modal-actions"><button type="button" disabled={savingProject} onClick={() => setProjectOpen(false)}>Cancelar</button><button className="primary" disabled={savingProject}>{savingProject ? "Guardando..." : "Crear proyecto"}</button></div></form></div>}
 
-      {taskOpen && <div className="scrim modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && !savingProject && setTaskOpen(false)}><form className="upload-modal task-modal" onSubmit={handleCreateTask}><button type="button" className="close" disabled={savingProject} onClick={() => setTaskOpen(false)}>×</button><span className="modal-icon">☷</span><h2>Nueva tarea</h2><p>Cada tarea debe pertenecer a un proyecto y tener una persona responsable.</p><label>Título<input required autoFocus value={newTask.title} onChange={(event) => setNewTask({ ...newTask, title: event.target.value })} /></label><label>Proyecto<select required value={newTask.projectId} onChange={(event) => setNewTask({ ...newTask, projectId: event.target.value })}><option value="">Selecciona un proyecto</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><div className="form-grid"><label>Responsable<select value={newTask.assignee} onChange={(event) => setNewTask({ ...newTask, assignee: event.target.value })}><option>Eduardo</option><option>Roberto</option></select></label><label>Prioridad<select value={newTask.priority} onChange={(event) => setNewTask({ ...newTask, priority: event.target.value })}><option value="low">Baja</option><option value="medium">Media</option><option value="high">Alta</option></select></label><label>Estado<select value={newTask.status} onChange={(event) => setNewTask({ ...newTask, status: event.target.value })}><option value="backlog">Pendientes</option><option value="todo">Por hacer</option><option value="in_progress">En progreso</option><option value="review">En revisión</option><option value="done">Terminado</option></select></label><label>Fecha límite<input type="date" value={newTask.dueDate} onChange={(event) => setNewTask({ ...newTask, dueDate: event.target.value })} /></label></div><div className="modal-actions"><button type="button" disabled={savingProject} onClick={() => setTaskOpen(false)}>Cancelar</button><button className="primary" disabled={savingProject || projects.length === 0}>{savingProject ? "Guardando..." : "Crear tarea"}</button></div>{projects.length === 0 && <small className="form-hint">Primero crea un proyecto.</small>}</form></div>}
+      {taskOpen && <div className="scrim modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && !savingProject && setTaskOpen(false)}><form className="upload-modal task-modal" onSubmit={handleCreateTask}><button type="button" className="close" disabled={savingProject} onClick={() => setTaskOpen(false)}>×</button><span className="modal-icon">☷</span><h2>Nueva tarea</h2><p>Cada tarea debe pertenecer a un proyecto y tener una persona responsable.</p><label>Título<input required autoFocus value={newTask.title} onChange={(event) => setNewTask({ ...newTask, title: event.target.value })} /></label><label>Descripción práctica<textarea value={newTask.description} onChange={(event) => setNewTask({ ...newTask, description: event.target.value })} placeholder="¿Qué hay que hacer y cuál es el resultado esperado?" /></label><label>Proyecto<select required value={newTask.projectId} onChange={(event) => setNewTask({ ...newTask, projectId: event.target.value })}><option value="">Selecciona un proyecto</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><div className="form-grid"><label>Responsable<select value={newTask.assignee} onChange={(event) => setNewTask({ ...newTask, assignee: event.target.value })}><option>Eduardo</option><option>Roberto</option></select></label><label>Prioridad<select value={newTask.priority} onChange={(event) => setNewTask({ ...newTask, priority: event.target.value })}><option value="low">Baja</option><option value="medium">Media</option><option value="high">Alta</option></select></label><label>Estado<select value={newTask.status} onChange={(event) => setNewTask({ ...newTask, status: event.target.value })}><option value="backlog">Pendientes</option><option value="todo">Por hacer</option><option value="in_progress">En progreso</option><option value="review">En revisión</option><option value="done">Terminado</option></select></label><label>Fecha límite<input type="date" value={newTask.dueDate} onChange={(event) => setNewTask({ ...newTask, dueDate: event.target.value })} /></label></div><div className="modal-actions"><button type="button" disabled={savingProject} onClick={() => setTaskOpen(false)}>Cancelar</button><button className="primary" disabled={savingProject || projects.length === 0}>{savingProject ? "Guardando..." : "Crear tarea"}</button></div>{projects.length === 0 && <small className="form-hint">Primero crea un proyecto.</small>}</form></div>}
 
       {uploadOpen && <div className="scrim modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && !uploading && setUploadOpen(false)}><section className="upload-modal"><button className="close" disabled={uploading} onClick={() => setUploadOpen(false)}>×</button><span className="modal-icon">□</span><h2>Agregar documentos</h2><p>El archivo se guardará en Firebase Storage y sus datos en Cloud Firestore.</p><button className="dropzone" disabled={uploading} onClick={() => fileRef.current?.click()}><span>{uploading ? "◌" : "↑"}</span><strong>{uploading ? "Guardando en Firebase..." : "Selecciona archivos"}</strong><small>PDF, DOCX, XLSX, PPTX o TXT · Máx. 25 MB</small></button><input ref={fileRef} type="file" multiple hidden onChange={(event) => void handleFiles(event.target.files)} /><label>Asignar al proyecto<select disabled={uploading} value={uploadProject} onChange={(event) => setUploadProject(event.target.value)}><option>Sin proyecto</option>{projects.map((project) => <option key={project.id}>{project.name}</option>)}</select></label><div className="modal-actions"><button disabled={uploading} onClick={() => setUploadOpen(false)}>Cancelar</button><button disabled={uploading} className="primary" onClick={() => fileRef.current?.click()}>{uploading ? "Guardando..." : "Elegir archivos"}</button></div></section></div>}
       {toast && <div className="toast"><span>✓</span>{toast}</div>}
