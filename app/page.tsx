@@ -133,6 +133,18 @@ function formatShortDate(dateISO: string) {
   return new Intl.DateTimeFormat("es-MX", { day: "numeric", month: "short" }).format(new Date(`${dateISO}T00:00:00`));
 }
 
+const STATUS_LABELS: Record<string, string> = { backlog: "Pendientes", todo: "Por hacer", in_progress: "En progreso", review: "En revisión", done: "Terminado" };
+
+function dueInfo(task: Task) {
+  if (!task.dueDate) return { text: "Sin fecha", cls: "" };
+  if (task.status === "done") return { text: formatShortDate(task.dueDate), cls: "" };
+  const days = daysUntil(task.dueDate);
+  if (days < 0) return { text: `Venció ${formatShortDate(task.dueDate)}`, cls: "overdue" };
+  if (days === 0) return { text: "Vence hoy", cls: "overdue" };
+  if (days <= 3) return { text: `Vence ${formatShortDate(task.dueDate)}`, cls: "soon" };
+  return { text: formatShortDate(task.dueDate), cls: "" };
+}
+
 type FocusItem = {
   key: string;
   rank: number;
@@ -158,6 +170,9 @@ export default function Home() {
   const [newStepText, setNewStepText] = useState("");
   const [newStepOwner, setNewStepOwner] = useState("");
   const [newStepDue, setNewStepDue] = useState("");
+  const [projectOwnerFilter, setProjectOwnerFilter] = useState("all");
+  const [taskAssigneeFilter, setTaskAssigneeFilter] = useState("all");
+  const [taskProjectFilter, setTaskProjectFilter] = useState("all");
   const [savingSteps, setSavingSteps] = useState(false);
   const [todayLabel, setTodayLabel] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -172,6 +187,38 @@ export default function Home() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const filtered = useMemo(() => projects.filter((project) => `${project.name} ${project.area} ${project.owner}`.toLowerCase().includes(search.toLowerCase())), [projects, search]);
+
+  const tasksByProject = useMemo(() => {
+    const map = new Map<string, Task[]>();
+    for (const task of tasks) {
+      const list = map.get(task.projectId) ?? [];
+      list.push(task);
+      map.set(task.projectId, list);
+    }
+    return map;
+  }, [tasks]);
+
+  const visibleProjects = useMemo(() => filtered.filter((project) => projectOwnerFilter === "all" || project.owner === projectOwnerFilter), [filtered, projectOwnerFilter]);
+
+  const visibleTasks = useMemo(() => tasks.filter((task) =>
+    (taskAssigneeFilter === "all" || task.assignee === taskAssigneeFilter) &&
+    (taskProjectFilter === "all" || task.projectId === taskProjectFilter) &&
+    `${task.title} ${task.description} ${task.projectName}`.toLowerCase().includes(search.toLowerCase())
+  ), [tasks, taskAssigneeFilter, taskProjectFilter, search]);
+
+  function projectCompletion(project: Project) {
+    const projectTasks = tasksByProject.get(project.id) ?? [];
+    const total = project.nextSteps.length + projectTasks.length;
+    if (!total) return null;
+    const done = project.nextSteps.filter((step) => step.done).length + projectTasks.filter((task) => task.status === "done").length;
+    return Math.round((done / total) * 100);
+  }
+
+  function overdueCount(project: Project) {
+    const projectTasks = tasksByProject.get(project.id) ?? [];
+    return project.nextSteps.filter((step) => !step.done && step.dueDate && daysUntil(step.dueDate) < 0).length
+      + projectTasks.filter((task) => task.status !== "done" && task.dueDate && daysUntil(task.dueDate) < 0).length;
+  }
 
   const attention = useMemo<FocusItem[]>(() => {
     const urgencyOf = (dateISO?: string) => {
@@ -341,7 +388,7 @@ export default function Home() {
 
       <section className="workspace">
         <header className="topbar">
-          <div className="search-wrap"><span>⌕</span><input aria-label="Buscar" placeholder="Buscar proyectos..." value={search} onChange={(event) => setSearch(event.target.value)} /><kbd>⌘ K</kbd></div>
+          <div className="search-wrap"><span>⌕</span><input aria-label="Buscar" placeholder="Buscar proyectos o tareas..." value={search} onChange={(event) => setSearch(event.target.value)} /><kbd>⌘ K</kbd></div>
           <button className="primary secondary-action" onClick={() => setTaskOpen(true)}>＋ Nueva tarea</button>
           <button className="primary secondary-action no-auto" onClick={() => setProjectOpen(true)}>＋ Nuevo proyecto</button>
           <button className="primary" onClick={() => setUploadOpen(true)}>＋ Agregar documento</button>
@@ -351,13 +398,11 @@ export default function Home() {
           <div className="heading-row"><div><p className="eyebrow">{todayLabel || "HOY"}</p><h1>{active === "Resumen" ? "Preparación para la ley laboral 2027" : active}</h1><p>{loading ? "Conectando con Firebase..." : "Información sincronizada con Firestore."}</p></div>{active === "Tareas" && <button className="primary" onClick={() => setTaskOpen(true)}>＋ Nueva tarea</button>}</div>
 
           {active === "Tareas" ? <section className="kanban-wrap">
-            <div className="board-toolbar"><div><strong>Tablero de trabajo</strong><span>{tasks.length} tarea(s) · Eduardo y Roberto</span></div><div className="people-stack"><i>E</i><i>R</i></div></div>
-            <div className="kanban-board">{[
-              ["backlog", "Pendientes"], ["todo", "Por hacer"], ["in_progress", "En progreso"], ["review", "En revisión"], ["done", "Terminado"]
-            ].map(([status, label]) => <div className="kanban-column" key={status}><header><span className={`column-dot ${status}`} />{label}<em>{tasks.filter((task) => task.status === status).length}</em></header><div className="task-stack">{tasks.filter((task) => task.status === status).map((task) => <article className="task-card clickable" role="button" tabIndex={0} key={task.id} onClick={() => { setSelectedTask(task); setTaskDescription(task.description); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { setSelectedTask(task); setTaskDescription(task.description); } }}><div className="task-meta"><span className={`priority ${task.priority}`}>{task.priority === "high" ? "Alta" : task.priority === "low" ? "Baja" : "Media"}</span><span>Ver detalle ›</span></div><h3>{task.title}</h3><p>{task.description || "Sin descripción práctica"}</p><small>{task.projectName}</small><footer><i>{task.assignee.charAt(0)}</i><span>{task.dueDate || "Sin fecha"}</span></footer><select aria-label={`Estado de ${task.title}`} value={task.status} onClick={(event) => event.stopPropagation()} onChange={(event) => { event.stopPropagation(); void updateTaskStatus(task.id, event.target.value); }}><option value="backlog">Pendientes</option><option value="todo">Por hacer</option><option value="in_progress">En progreso</option><option value="review">En revisión</option><option value="done">Terminado</option></select></article>)}{!loading && tasks.filter((task) => task.status === status).length === 0 && <button className="add-task-card" onClick={() => { setNewTask({ ...newTask, status }); setTaskOpen(true); }}>＋ Agregar tarea</button>}</div></div>)}</div>
+            <div className="board-toolbar"><div><strong>Tablero de trabajo</strong><span>{visibleTasks.length === tasks.length ? `${tasks.length} tarea(s) · Eduardo y Roberto` : `Mostrando ${visibleTasks.length} de ${tasks.length} tarea(s)`}</span></div><div className="board-filters"><div className="chip-group">{[["all", "Todos"], ["Eduardo", "Eduardo"], ["Roberto", "Roberto"]].map(([value, label]) => <button key={value} className={taskAssigneeFilter === value ? "chip active" : "chip"} onClick={() => setTaskAssigneeFilter(value)}>{label}</button>)}</div><select className="filter-select" aria-label="Filtrar por proyecto" value={taskProjectFilter} onChange={(event) => setTaskProjectFilter(event.target.value)}><option value="all">Todos los proyectos</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></div></div>
+            <div className="kanban-board">{Object.entries(STATUS_LABELS).map(([status, label]) => <div className="kanban-column" key={status}><header><span className={`column-dot ${status}`} />{label}<em>{visibleTasks.filter((task) => task.status === status).length}</em></header><div className="task-stack">{visibleTasks.filter((task) => task.status === status).map((task) => { const due = dueInfo(task); return <article className="task-card clickable" role="button" tabIndex={0} key={task.id} onClick={() => { setSelectedTask(task); setTaskDescription(task.description); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { setSelectedTask(task); setTaskDescription(task.description); } }}><div className="task-meta"><span className={`priority ${task.priority}`}>{task.priority === "high" ? "Alta" : task.priority === "low" ? "Baja" : "Media"}</span><span>Ver detalle ›</span></div><h3>{task.title}</h3><p>{task.description || "Sin descripción práctica"}</p><small>{task.projectName}</small><footer><i>{task.assignee.charAt(0)}</i><span className={`due-chip ${due.cls}`}>{due.text}</span></footer><select aria-label={`Estado de ${task.title}`} value={task.status} onClick={(event) => event.stopPropagation()} onChange={(event) => { event.stopPropagation(); void updateTaskStatus(task.id, event.target.value); }}>{Object.entries(STATUS_LABELS).map(([value, text]) => <option key={value} value={value}>{text}</option>)}</select></article>; })}{!loading && visibleTasks.filter((task) => task.status === status).length === 0 && <button className="add-task-card" onClick={() => { setNewTask({ ...newTask, status }); setTaskOpen(true); }}>＋ Agregar tarea</button>}</div></div>)}</div>
           </section> : active === "Proyectos" ? <section className="portfolio-view">
-            <div className="portfolio-head"><div><h2>Cartera de proyectos</h2><p>Separa oportunidades en evaluación del trabajo que ya está en marcha.</p></div><button className="primary" onClick={() => setProjectOpen(true)}>＋ Nuevo proyecto</button></div>
-            <div className="portfolio-grid">{[["potential", "Proyectos potenciales"], ["active", "Proyectos activos"]].map(([status, label]) => <section className="portfolio-group panel" key={status}><header><div><span className={`portfolio-dot ${status}`} /><h3>{label}</h3></div><em>{projects.filter((project) => project.status === status).length}</em></header>{projects.filter((project) => project.status === status).map((project) => <button className="portfolio-card" key={project.id} onClick={() => setSelected(project)}><div className="portfolio-card-top"><i>{project.name.charAt(0)}</i><span className="status neutral">{project.risk}</span></div><h4>{project.name}</h4><p>{project.area}</p>{project.nextSteps.length > 0 && <div className="steps-progress"><i><em style={{ width: `${Math.round((project.nextSteps.filter((step) => step.done).length / project.nextSteps.length) * 100)}%` }} /></i><span>{project.nextSteps.filter((step) => step.done).length}/{project.nextSteps.length} pasos</span></div>}<footer><span><b>{initials(project.owner)}</b>{project.owner}</span><em>{tasks.filter((task) => task.projectId === project.id).length} tareas</em></footer></button>)}{!loading && projects.filter((project) => project.status === status).length === 0 && <div className="portfolio-empty">No hay proyectos en esta etapa.</div>}</section>)}</div>
+            <div className="portfolio-head"><div><h2>Cartera de proyectos</h2><p>Separa oportunidades en evaluación del trabajo que ya está en marcha.</p></div><div className="board-filters"><div className="chip-group">{[["all", "Todos"], ["Eduardo", "Eduardo"], ["Roberto", "Roberto"]].map(([value, label]) => <button key={value} className={projectOwnerFilter === value ? "chip active" : "chip"} onClick={() => setProjectOwnerFilter(value)}>{label}</button>)}</div><button className="primary" onClick={() => setProjectOpen(true)}>＋ Nuevo proyecto</button></div></div>
+            <div className="portfolio-grid">{[["potential", "Proyectos potenciales"], ["active", "Proyectos activos"]].map(([status, label]) => <section className="portfolio-group panel" key={status}><header><div><span className={`portfolio-dot ${status}`} /><h3>{label}</h3></div><em>{visibleProjects.filter((project) => project.status === status).length}</em></header>{visibleProjects.filter((project) => project.status === status).map((project) => { const completion = projectCompletion(project); const overdue = overdueCount(project); const nextStep = project.nextSteps.find((step) => !step.done); const projectTaskCount = (tasksByProject.get(project.id) ?? []).length; return <button className="portfolio-card" key={project.id} onClick={() => setSelected(project)}><div className="portfolio-card-top"><i>{project.name.charAt(0)}</i>{overdue > 0 ? <span className="status critico">{overdue} vencida{overdue > 1 ? "s" : ""}</span> : completion !== null ? <span className="status en-tiempo">{completion}% avance</span> : <span className="status neutral">Sin plan aún</span>}</div><h4>{project.name}</h4><p>{project.area}</p>{nextStep && <div className="card-next"><small>SIGUIENTE PASO</small><span>{nextStep.text}</span></div>}{project.nextSteps.length > 0 && <div className="steps-progress"><i><em style={{ width: `${Math.round((project.nextSteps.filter((step) => step.done).length / project.nextSteps.length) * 100)}%` }} /></i><span>{project.nextSteps.filter((step) => step.done).length}/{project.nextSteps.length} pasos</span></div>}<footer><span><b>{initials(project.owner)}</b>{project.owner}</span><em>{projectTaskCount} tarea{projectTaskCount === 1 ? "" : "s"}</em></footer></button>; })}{!loading && visibleProjects.filter((project) => project.status === status).length === 0 && <div className="portfolio-empty">{projectOwnerFilter !== "all" || search ? "Ningún proyecto coincide con el filtro." : "No hay proyectos en esta etapa."}</div>}</section>)}</div>
           </section> : <>
 
           <section className="panel focus-panel">
@@ -403,7 +448,13 @@ export default function Home() {
         </div>
       </section>
 
-      {selected && <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && setSelected(null)}><aside className="drawer"><button className="close" onClick={() => setSelected(null)}>×</button><span className="status neutral">{selected.status === "active" ? "Activo" : "Potencial"}</span><h2>{selected.name}</h2><p className="muted">{selected.area}</p>{selected.description && <><h3>Propuesta</h3><p className="drawer-description">{selected.description}</p></>}<h3>Visión actualizada en sesión 2</h3><div className="assistant-note"><span>✦</span><p>{selected.session2Alignment || "Pendiente de definir alineación estratégica."}</p></div>
+      {selected && (() => { const projectTasks = tasksByProject.get(selected.id) ?? []; const completion = projectCompletion(selected); const stepsDone = selected.nextSteps.filter((step) => step.done).length; const tasksDone = projectTasks.filter((task) => task.status === "done").length; const nextPending = selected.nextSteps.find((step) => !step.done); return <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && setSelected(null)}><aside className="drawer"><button className="close" onClick={() => setSelected(null)}>×</button><span className="status neutral">{selected.status === "active" ? "Activo" : "Potencial"}</span><h2>{selected.name}</h2><p className="muted">{selected.area}</p>
+
+          <div className="drawer-score"><strong>{completion ?? 0}%</strong><span>{completion === null ? "Agrega pasos o tareas para medir el avance real." : `${stepsDone}/${selected.nextSteps.length} pasos · ${tasksDone}/${projectTasks.length} tareas completadas`}</span><i><em style={{ width: `${completion ?? 0}%` }} /></i></div>
+
+          <div className="now-next"><span>➔</span><div><small>AHORA TOCA</small><p>{nextPending ? nextPending.text : projectTasks.some((task) => task.status !== "done") ? "Terminar las tareas abiertas de este proyecto." : "Define el siguiente paso en la ruta de abajo."}</p>{nextPending && (nextPending.owner || nextPending.dueDate) && <em>{nextPending.owner}{nextPending.owner && nextPending.dueDate ? " · " : ""}{nextPending.dueDate ? `para el ${formatShortDate(nextPending.dueDate)}` : ""}</em>}</div></div>
+
+          {selected.description && <><h3>¿De qué se trata?</h3><p className="drawer-description">{selected.description}</p></>}<h3>Visión actualizada en sesión 2</h3><div className="assistant-note"><span>✦</span><p>{selected.session2Alignment || "Pendiente de definir alineación estratégica."}</p></div>
 
           <h3>Ruta a seguir</h3>
           <p className="field-help">Los siguientes pasos concretos para avanzar este proyecto.</p>
@@ -424,9 +475,12 @@ export default function Home() {
             </div>
           </form>
 
-          <h3>Contexto del proyecto</h3><dl><div><dt>Responsable inicial</dt><dd>{selected.owner}</dd></div><div><dt>Prioridad</dt><dd>{selected.priority || "Sin definir"}</dd></div><div><dt>Avance</dt><dd>{selected.progress}%</dd></div><div><dt>Última actualización</dt><dd>{formatDate(selected.updatedAt)}</dd></div></dl></aside></div>}
+          <h3>Tareas de este proyecto</h3>
+          {projectTasks.length === 0 ? <p className="field-help">Todavía no hay tareas ligadas. Créalas desde “＋ Nueva tarea” eligiendo este proyecto.</p> : <div className="drawer-tasks">{projectTasks.map((task) => <button type="button" key={task.id} onClick={() => { setSelected(null); setSelectedTask(task); setTaskDescription(task.description); }}><span className={`column-dot ${task.status}`} /><span className="dt-body"><strong>{task.title}</strong><small>{task.assignee}{task.dueDate ? ` · ${formatShortDate(task.dueDate)}` : ""}</small></span><em>{STATUS_LABELS[task.status] ?? task.status}</em></button>)}</div>}
 
-      {selectedTask && <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && setSelectedTask(null)}><aside className="drawer task-detail"><button className="close" onClick={() => setSelectedTask(null)}>×</button><span className={`priority ${selectedTask.priority}`}>{selectedTask.priority === "high" ? "Prioridad alta" : selectedTask.priority === "low" ? "Prioridad baja" : "Prioridad media"}</span><h2>{selectedTask.title}</h2><p className="muted">{selectedTask.projectName}</p><h3>Descripción práctica</h3><p className="field-help">Explica con palabras sencillas qué hay que hacer, qué se debe entregar y cuándo se considera terminada.</p><textarea className="task-description-editor" value={taskDescription} onChange={(event) => setTaskDescription(event.target.value)} placeholder="Ejemplo: Revisar el documento, resumir los requisitos en una página y compartirlos con Roberto para validación." /><button className="primary wide" disabled={savingProject} onClick={() => void saveTaskDescription()}>{savingProject ? "Guardando..." : "Guardar descripción"}</button><h3>Datos de la tarea</h3><dl><div><dt>Responsable</dt><dd>{selectedTask.assignee}</dd></div><div><dt>Estado</dt><dd>{selectedTask.status.replaceAll("_", " ")}</dd></div><div><dt>Fecha límite</dt><dd>{selectedTask.dueDate || "Sin fecha"}</dd></div></dl></aside></div>}
+          <h3>Contexto del proyecto</h3><dl><div><dt>Responsable inicial</dt><dd>{selected.owner}</dd></div><div><dt>Prioridad</dt><dd>{selected.priority || "Sin definir"}</dd></div><div><dt>Avance</dt><dd>{completion ?? selected.progress}%</dd></div><div><dt>Última actualización</dt><dd>{formatDate(selected.updatedAt)}</dd></div></dl></aside></div>; })()}
+
+      {selectedTask && <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && setSelectedTask(null)}><aside className="drawer task-detail"><button className="close" onClick={() => setSelectedTask(null)}>×</button><span className={`priority ${selectedTask.priority}`}>{selectedTask.priority === "high" ? "Prioridad alta" : selectedTask.priority === "low" ? "Prioridad baja" : "Prioridad media"}</span><h2>{selectedTask.title}</h2><p className="muted">{selectedTask.projectName}</p><h3>Descripción práctica</h3><p className="field-help">Explica con palabras sencillas qué hay que hacer, qué se debe entregar y cuándo se considera terminada.</p><textarea className="task-description-editor" value={taskDescription} onChange={(event) => setTaskDescription(event.target.value)} placeholder="Ejemplo: Revisar el documento, resumir los requisitos en una página y compartirlos con Roberto para validación." /><button className="primary wide" disabled={savingProject} onClick={() => void saveTaskDescription()}>{savingProject ? "Guardando..." : "Guardar descripción"}</button><h3>Datos de la tarea</h3><dl><div><dt>Responsable</dt><dd>{selectedTask.assignee}</dd></div><div><dt>Estado</dt><dd>{STATUS_LABELS[selectedTask.status] ?? selectedTask.status}</dd></div><div><dt>Fecha límite</dt><dd>{selectedTask.dueDate || "Sin fecha"}</dd></div></dl></aside></div>}
 
       {projectOpen && <div className="scrim modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && !savingProject && setProjectOpen(false)}><form className="upload-modal" onSubmit={handleCreateProject}><button type="button" className="close" disabled={savingProject} onClick={() => setProjectOpen(false)}>×</button><span className="modal-icon">▦</span><h2>Nuevo proyecto</h2><p>Agrégalo como potencial mientras se evalúa o como activo si ya está aprobado.</p><label>Nombre del proyecto<input required autoFocus value={newProject.name} onChange={(event) => setNewProject({ ...newProject, name: event.target.value })} /></label><label>Área<input value={newProject.area} onChange={(event) => setNewProject({ ...newProject, area: event.target.value })} /></label><label>Responsable<select value={newProject.owner} onChange={(event) => setNewProject({ ...newProject, owner: event.target.value })}><option>Eduardo</option><option>Roberto</option></select></label><label>Etapa<select value={newProject.status} onChange={(event) => setNewProject({ ...newProject, status: event.target.value })}><option value="potential">Potencial</option><option value="active">Activo</option></select></label><div className="modal-actions"><button type="button" disabled={savingProject} onClick={() => setProjectOpen(false)}>Cancelar</button><button className="primary" disabled={savingProject}>{savingProject ? "Guardando..." : "Crear proyecto"}</button></div></form></div>}
 
