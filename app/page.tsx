@@ -8,6 +8,8 @@ type NextStep = {
   id: string;
   text: string;
   done: boolean;
+  owner?: string;
+  dueDate?: string;
 };
 
 type Project = {
@@ -70,10 +72,12 @@ function toProject(doc: QueryDocumentSnapshot<DocumentData>): Project {
     session2Alignment: data.session2Alignment ? String(data.session2Alignment) : undefined,
     priority: data.priority ? String(data.priority) : undefined,
     nextSteps: Array.isArray(data.nextSteps)
-      ? data.nextSteps.map((step: { id?: string; text?: string; done?: boolean }, index: number) => ({
+      ? data.nextSteps.map((step: { id?: string; text?: string; done?: boolean; owner?: string | null; dueDate?: string | null }, index: number) => ({
           id: step.id ?? String(index),
           text: String(step.text ?? ""),
           done: Boolean(step.done),
+          owner: step.owner ? String(step.owner) : undefined,
+          dueDate: step.dueDate ? String(step.dueDate) : undefined,
         }))
       : [],
     updatedAt: data.updatedAt,
@@ -117,6 +121,29 @@ function initials(name: string) {
   return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "—";
 }
 
+function todayISO() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chihuahua", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+}
+
+function daysUntil(dateISO: string) {
+  return Math.round((Date.parse(`${dateISO}T00:00:00`) - Date.parse(`${todayISO()}T00:00:00`)) / 86400000);
+}
+
+function formatShortDate(dateISO: string) {
+  return new Intl.DateTimeFormat("es-MX", { day: "numeric", month: "short" }).format(new Date(`${dateISO}T00:00:00`));
+}
+
+type FocusItem = {
+  key: string;
+  rank: number;
+  flag: string;
+  tone: "overdue" | "soon" | "info";
+  title: string;
+  context: string;
+  owner: string;
+  open: () => void;
+};
+
 export default function Home() {
   const [active, setActive] = useState("Resumen");
   const [search, setSearch] = useState("");
@@ -129,6 +156,8 @@ export default function Home() {
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [taskDescription, setTaskDescription] = useState("");
   const [newStepText, setNewStepText] = useState("");
+  const [newStepOwner, setNewStepOwner] = useState("");
+  const [newStepDue, setNewStepDue] = useState("");
   const [savingSteps, setSavingSteps] = useState(false);
   const [todayLabel, setTodayLabel] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -143,6 +172,44 @@ export default function Home() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const filtered = useMemo(() => projects.filter((project) => `${project.name} ${project.area} ${project.owner}`.toLowerCase().includes(search.toLowerCase())), [projects, search]);
+
+  const attention = useMemo<FocusItem[]>(() => {
+    const urgencyOf = (dateISO?: string) => {
+      if (!dateISO) return null;
+      const days = daysUntil(dateISO);
+      if (days < 0) return { rank: -100 + days, flag: "VENCIDA", tone: "overdue" as const, note: days === -1 ? "venció ayer" : `venció hace ${-days} días` };
+      if (days === 0) return { rank: 0, flag: "HOY", tone: "overdue" as const, note: "vence hoy" };
+      if (days <= 7) return { rank: days, flag: days === 1 ? "MAÑANA" : `EN ${days} DÍAS`, tone: "soon" as const, note: `vence el ${formatShortDate(dateISO)}` };
+      return null;
+    };
+    const items: FocusItem[] = [];
+    for (const task of tasks) {
+      if (task.status === "done") continue;
+      const openTask = () => { setSelectedTask(task); setTaskDescription(task.description); };
+      const urgency = urgencyOf(task.dueDate);
+      if (urgency) {
+        items.push({ key: `task-${task.id}`, rank: urgency.rank, flag: urgency.flag, tone: urgency.tone, title: task.title, context: `${task.projectName} · ${urgency.note}`, owner: task.assignee, open: openTask });
+      } else if (task.status === "review") {
+        items.push({ key: `task-${task.id}`, rank: 50, flag: "REVISIÓN", tone: "info", title: task.title, context: `${task.projectName} · esperando revisión`, owner: task.assignee, open: openTask });
+      }
+    }
+    for (const project of projects) {
+      const step = project.nextSteps.find((item) => !item.done);
+      if (!step) continue;
+      const urgency = urgencyOf(step.dueDate);
+      items.push({
+        key: `step-${project.id}`,
+        rank: urgency ? urgency.rank : project.status === "active" ? 80 : 90,
+        flag: urgency ? urgency.flag : "SIG. PASO",
+        tone: urgency ? urgency.tone : "info",
+        title: step.text,
+        context: `${project.name} · ${urgency ? urgency.note : "siguiente paso de la ruta"}`,
+        owner: step.owner || project.owner,
+        open: () => setSelected(project),
+      });
+    }
+    return items.sort((a, b) => a.rank - b.rank);
+  }, [tasks, projects]);
   const completedProjects = projects.filter((project) => project.progress >= 100).length;
   const readiness = projects.length ? Math.round(projects.reduce((sum, project) => sum + project.progress, 0) / projects.length) : null;
 
@@ -227,9 +294,11 @@ export default function Home() {
 
   function addStep() {
     if (!selected || !newStepText.trim()) return;
-    const step: NextStep = { id: crypto.randomUUID(), text: newStepText.trim(), done: false };
+    const step: NextStep = { id: crypto.randomUUID(), text: newStepText.trim(), done: false, owner: newStepOwner || undefined, dueDate: newStepDue || undefined };
     void persistSteps(selected, [...selected.nextSteps, step]);
     setNewStepText("");
+    setNewStepOwner("");
+    setNewStepDue("");
   }
 
   function toggleStep(stepId: string) {
@@ -291,6 +360,15 @@ export default function Home() {
             <div className="portfolio-grid">{[["potential", "Proyectos potenciales"], ["active", "Proyectos activos"]].map(([status, label]) => <section className="portfolio-group panel" key={status}><header><div><span className={`portfolio-dot ${status}`} /><h3>{label}</h3></div><em>{projects.filter((project) => project.status === status).length}</em></header>{projects.filter((project) => project.status === status).map((project) => <button className="portfolio-card" key={project.id} onClick={() => setSelected(project)}><div className="portfolio-card-top"><i>{project.name.charAt(0)}</i><span className="status neutral">{project.risk}</span></div><h4>{project.name}</h4><p>{project.area}</p>{project.nextSteps.length > 0 && <div className="steps-progress"><i><em style={{ width: `${Math.round((project.nextSteps.filter((step) => step.done).length / project.nextSteps.length) * 100)}%` }} /></i><span>{project.nextSteps.filter((step) => step.done).length}/{project.nextSteps.length} pasos</span></div>}<footer><span><b>{initials(project.owner)}</b>{project.owner}</span><em>{tasks.filter((task) => task.projectId === project.id).length} tareas</em></footer></button>)}{!loading && projects.filter((project) => project.status === status).length === 0 && <div className="portfolio-empty">No hay proyectos en esta etapa.</div>}</section>)}</div>
           </section> : <>
 
+          <section className="panel focus-panel">
+            <div className="panel-head"><div><h2>¿Qué sigue?</h2><p>Prioridades de hoy y la semana: fechas límite, revisiones pendientes y el siguiente paso de cada proyecto.</p></div>{attention.length > 0 && <em className="focus-count">{attention.length}</em>}</div>
+            <div className="focus-list">
+              {attention.slice(0, 6).map((item) => <button className="focus-row" key={item.key} onClick={item.open}><span className={`focus-flag ${item.tone}`}>{item.flag}</span><span className="focus-body"><strong>{item.title}</strong><small>{item.context}</small></span><span className="focus-owner"><i>{initials(item.owner)}</i>{item.owner}</span><b className="chevron">›</b></button>)}
+              {!loading && attention.length === 0 && <div className="focus-empty"><b>✓</b>Nada urgente por ahora. Agrega fechas límite a tus tareas y pasos para que esta lista trabaje por ti.</div>}
+            </div>
+            {attention.length > 6 && <footer className="focus-more">+{attention.length - 6} pendiente(s) más en Tareas y Proyectos</footer>}
+          </section>
+
           <section className={`readiness-card ${readiness === null ? "readiness-empty" : ""}`}>
             <div className="readiness-copy"><div className="tag">JORNADA LABORAL 2027</div>{readiness === null ? <><h2>Aún no hay datos para calcular la preparación</h2><p>Crea tu primer proyecto y agrega sus documentos. El indicador se construirá con información real.</p><button onClick={() => setProjectOpen(true)}>Crear primer proyecto <b>→</b></button></> : <><h2>Preparación actual: <span>{readiness}%</span></h2><p>Promedio calculado con el avance registrado en {projects.length} proyecto(s) y {documents.length} documento(s).</p><button onClick={() => setActive("Plan de transición")}>Ver plan de transición <b>→</b></button></>}</div>
             {readiness !== null && <div className="ring" style={{ "--percent": `${readiness}%` } as React.CSSProperties}><div><strong>{readiness}%</strong><small>Preparación</small></div></div>}
@@ -330,16 +408,20 @@ export default function Home() {
           <h3>Ruta a seguir</h3>
           <p className="field-help">Los siguientes pasos concretos para avanzar este proyecto.</p>
           <div className="steps-list">
-            {selected.nextSteps.map((step) => <div className={step.done ? "step-row done" : "step-row"} key={step.id}>
+            {selected.nextSteps.map((step) => { const overdue = !step.done && step.dueDate && daysUntil(step.dueDate) < 0; return <div className={step.done ? "step-row done" : "step-row"} key={step.id}>
               <button type="button" className="step-check" aria-label={step.done ? "Marcar como pendiente" : "Marcar como hecho"} onClick={() => toggleStep(step.id)}>{step.done ? "✓" : ""}</button>
-              <span>{step.text}</span>
+              <span className="step-body"><span>{step.text}</span>{(step.owner || step.dueDate) && <small>{step.owner}{step.owner && step.dueDate ? " · " : ""}{step.dueDate && <b className={overdue ? "overdue" : ""}>{overdue ? "venció el " : ""}{formatShortDate(step.dueDate)}</b>}</small>}</span>
               <button type="button" className="step-remove" aria-label="Eliminar paso" onClick={() => removeStep(step.id)}>×</button>
-            </div>)}
+            </div>; })}
             {selected.nextSteps.length === 0 && <div className="steps-empty">Todavía no hay pasos definidos.</div>}
           </div>
-          <form className="step-add" onSubmit={(event) => { event.preventDefault(); addStep(); }}>
+          <form className="step-add stacked" onSubmit={(event) => { event.preventDefault(); addStep(); }}>
             <input placeholder="Agregar siguiente paso..." value={newStepText} onChange={(event) => setNewStepText(event.target.value)} disabled={savingSteps} />
-            <button type="submit" className="primary" disabled={savingSteps || !newStepText.trim()}>＋</button>
+            <div className="step-add-meta">
+              <select aria-label="Responsable del paso" value={newStepOwner} onChange={(event) => setNewStepOwner(event.target.value)} disabled={savingSteps}><option value="">Sin responsable</option><option>Eduardo</option><option>Roberto</option></select>
+              <input type="date" aria-label="Fecha límite del paso" value={newStepDue} onChange={(event) => setNewStepDue(event.target.value)} disabled={savingSteps} />
+              <button type="submit" className="primary" disabled={savingSteps || !newStepText.trim()}>＋</button>
+            </div>
           </form>
 
           <h3>Contexto del proyecto</h3><dl><div><dt>Responsable inicial</dt><dd>{selected.owner}</dd></div><div><dt>Prioridad</dt><dd>{selected.priority || "Sin definir"}</dd></div><div><dt>Avance</dt><dd>{selected.progress}%</dd></div><div><dt>Última actualización</dt><dd>{formatDate(selected.updatedAt)}</dd></div></dl></aside></div>}

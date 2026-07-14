@@ -85,6 +85,8 @@ export async function updateTaskDescription(taskId: string, description: string)
   await updateDoc(doc(db, "tasks", taskId), { description: description.trim(), updatedAt: serverTimestamp() });
 }
 
-export async function updateProjectSteps(projectId: string, steps: { id: string; text: string; done: boolean }[]) {
-  await updateDoc(doc(db, "projects", projectId), { nextSteps: steps, updatedAt: serverTimestamp() });
+export async function updateProjectSteps(projectId: string, steps: { id: string; text: string; done: boolean; owner?: string; dueDate?: string }[]) {
+  // Firestore rechaza `undefined` dentro de arrays; se normaliza a null.
+  const clean = steps.map((step) => ({ id: step.id, text: step.text, done: step.done, owner: step.owner ?? null, dueDate: step.dueDate ?? null }));
+  await updateDoc(doc(db, "projects", projectId), { nextSteps: clean, updatedAt: serverTimestamp() });
 }
